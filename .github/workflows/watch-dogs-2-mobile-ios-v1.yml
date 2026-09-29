@@ -1,4 +1,4 @@
-name: Watch Dogs 2 Mobile iOS - v1 Mono Recovery
+name: Watch Dogs 2 Mobile iOS - v1.1 Unity Legacy Lib Fix
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   recover_and_build:
     name: 1. Recover Unity project and export iOS
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
 
     env:
@@ -43,6 +43,18 @@ jobs:
           set -euo pipefail
           rm -rf "$WORK" "$OUTPUT" "$GITHUB_WORKSPACE/wd2-build"
           mkdir -p "$WORK" "$APKROOT" "$RECOVERED" "$OUTPUT" "$GITHUB_WORKSPACE/wd2-build/iOS"
+
+      - name: Install Unity 2019 legacy Linux libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -o Acquire::Retries=4
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y             libgconf-2-4             libgtk2.0-0             libgtk-3-0             libnss3             libasound2             libglu1-mesa             libxss1             libxtst6             libxrandr2             libxcursor1             libxi6             libxinerama1             libxcomposite1             libxdamage1             libxfixes3             libdrm2             libgbm1             xvfb
+
+          echo "===== VERIFY UNITY LEGACY LIBRARIES ====="
+          ldconfig -p | grep -E 'libgconf-2.so.4|libgtk-x11-2.0.so|libGLU.so' || true
 
       - name: Find Watch Dogs 2 APK automatically
         shell: bash
@@ -781,6 +793,25 @@ jobs:
           });
           NODE
 
+      - name: Verify Unity Editor runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Unity editor: $UNITY_EDITOR"
+
+          MISSING="$(
+            ldd "$UNITY_EDITOR" 2>/dev/null               | grep 'not found' || true
+          )"
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Unity Editor still has missing Linux libraries:"
+            echo "$MISSING"
+            exit 1
+          fi
+
+          echo "All direct Unity Editor shared libraries are present."
+
       - name: Build Watch Dogs 2 Mobile iOS Xcode project
         id: unity_build
         shell: bash
@@ -854,11 +885,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz" \
+          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz" \
             -C "$GITHUB_WORKSPACE/wd2-build/iOS" \
             WatchDogs2Mobile-iOS
 
-          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz"
+          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz"
 
       - name: Collect Unity diagnostics
         if: always()
@@ -866,7 +897,7 @@ jobs:
         run: |
           set +e
 
-          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics"
+          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics"
           rm -rf "$DIAG"
           mkdir -p "$DIAG"
 
@@ -903,8 +934,8 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode
-          path: Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz
+          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode
+          path: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz
           compression-level: 0
           if-no-files-found: error
 
@@ -912,8 +943,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics
           compression-level: 0
           if-no-files-found: warn
 
@@ -922,7 +953,7 @@ jobs:
         shell: bash
         run: |
           echo "::error::Unity did not generate the Watch Dogs 2 Mobile iOS Xcode project."
-          echo "Download Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics and send it here."
+          echo "Download Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics and send it here."
           exit 1
 
   make_ipa:
@@ -936,7 +967,7 @@ jobs:
       - name: Download Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode
+          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode
           path: packed-xcode
 
       - name: Extract Xcode project
@@ -1099,15 +1130,15 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            "Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa"
+            "Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa"
 
-          ls -lh "Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa"
+          ls -lh "Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1-unsigned-IPA
-          path: Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa
+          name: Watch-Dogs-2-Mobile-iOS-v1.1-unsigned-IPA
+          path: Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa
           compression-level: 0
           if-no-files-found: error
 
@@ -1117,35 +1148,35 @@ jobs:
         run: |
           set +e
 
-          rm -rf Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
-          mkdir -p Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+          rm -rf Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
+          mkdir -p Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
 
           cp xcode-build.log \
-            Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           cp "$XCODE_PROJECT/project.pbxproj" \
-            Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           {
             xcodebuild -version
             echo
             xcodebuild -list -project "$XCODE_PROJECT" 2>&1 || true
-          } > Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/xcode-info.txt
+          } > Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/xcode-info.txt
 
           grep -nEi -A 20 -B 8 \
             'error:|fatal error|undefined symbol|ld:|clang:|failed|failure' \
             xcode-build.log \
             | tail -500 \
-            > Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/important-errors.txt \
+            > Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/important-errors.txt \
             2>/dev/null || true
 
       - name: Upload Xcode diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
           compression-level: 0
           if-no-files-found: warn

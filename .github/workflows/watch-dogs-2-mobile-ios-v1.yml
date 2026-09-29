@@ -1,0 +1,1151 @@
+name: Watch Dogs 2 Mobile iOS - v1 Mono Recovery
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover_and_build:
+    name: 1. Recover Unity project and export iOS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      UNITY_USERNAME: ${{ secrets.UNITY_USERNAME }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      UNITY_EMAIL: ${{ secrets.UNITY_USERNAME }}
+
+      UNITY_VERSION: "2019.4.40f1"
+      UNITY_CHANGESET: "ffc62b691db5"
+
+      WORK: ${{ github.workspace }}/wd2-work
+      APK: ${{ github.workspace }}/wd2-work/WatchDogs2Mobile.apk
+      APKROOT: ${{ github.workspace }}/wd2-work/apk
+      RECOVERED: ${{ github.workspace }}/wd2-work/recovered
+      OUTPUT: ${{ github.workspace }}/wd2-output
+      XCODE_OUT: ${{ github.workspace }}/wd2-build/iOS/WatchDogs2Mobile-iOS
+
+    outputs:
+      xcode_ready: ${{ steps.detect_xcode.outputs.ready }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$WORK" "$OUTPUT" "$GITHUB_WORKSPACE/wd2-build"
+          mkdir -p "$WORK" "$APKROOT" "$RECOVERED" "$OUTPUT" "$GITHUB_WORKSPACE/wd2-build/iOS"
+
+      - name: Find Watch Dogs 2 APK automatically
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          echo "===== SEARCH APK IN REPOSITORY ====="
+          FOUND="$(
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname '*.apk' \
+              ! -path "$WORK/*" \
+              -printf '%s %p\n' \
+              | sort -nr \
+              | head -1 \
+              | cut -d' ' -f2-
+          )"
+
+          if [ -n "$FOUND" ] && [ -f "$FOUND" ]; then
+            if head -c 200 "$FOUND" 2>/dev/null | grep -q 'git-lfs.github.com/spec'; then
+              echo "APK is a Git LFS pointer. Pulling LFS data..."
+              git lfs install --local || true
+              git lfs pull || true
+            fi
+
+            if [ -s "$FOUND" ] && ! head -c 200 "$FOUND" 2>/dev/null | grep -q 'git-lfs.github.com/spec'; then
+              echo "Found APK in repository: $FOUND"
+              cp "$FOUND" "$APK"
+            fi
+          fi
+
+          if [ ! -s "$APK" ]; then
+            echo "===== SEARCH APK IN GITHUB RELEASES ====="
+            mkdir -p "$WORK/releases"
+
+            TAGS="$(
+              gh release list \
+                --repo "$GITHUB_REPOSITORY" \
+                --limit 100 \
+                --json tagName \
+                --jq '.[].tagName' 2>/dev/null || true
+            )"
+
+            for TAG in $TAGS; do
+              rm -rf "$WORK/release-one"
+              mkdir -p "$WORK/release-one"
+
+              gh release download "$TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern '*.apk' \
+                --dir "$WORK/release-one" \
+                2>/dev/null || true
+
+              CANDIDATE="$(
+                find "$WORK/release-one" \
+                  -type f \
+                  -iname '*.apk' \
+                  -printf '%s %p\n' \
+                  | sort -nr \
+                  | head -1 \
+                  | cut -d' ' -f2-
+              )"
+
+              if [ -n "$CANDIDATE" ] && [ -s "$CANDIDATE" ]; then
+                echo "Found APK in release $TAG: $CANDIDATE"
+                cp "$CANDIDATE" "$APK"
+                break
+              fi
+            done
+          fi
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::No APK found in repository or Releases."
+            exit 1
+          fi
+
+          echo "APK:"
+          ls -lh "$APK"
+
+      - name: Verify exact Watch Dogs 2 Mobile base
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unzip -oq "$APK" -d "$APKROOT"
+
+          DATA="$APKROOT/assets/bin/Data"
+          ASM="$DATA/Managed/Assembly-CSharp.dll"
+
+          test -s "$DATA/globalgamemanagers"
+          test -s "$ASM"
+
+          VERSION="$(
+            strings "$DATA/globalgamemanagers" \
+              | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+[abfp][0-9]+' \
+              | head -1
+          )"
+
+          echo "Detected Unity: $VERSION"
+
+          if [ "$VERSION" != "5.6.5f1" ]; then
+            echo "::error::Expected Unity 5.6.5f1, got $VERSION"
+            exit 1
+          fi
+
+          if find "$APKROOT" -type f -name 'libil2cpp.so' | grep -q .; then
+            echo "::error::This APK is IL2CPP, but v1 expects the Mono Watch Dogs 2 Mobile build."
+            exit 1
+          fi
+
+          if ! find "$APKROOT" -type f -name 'libmono.so' | grep -q .; then
+            echo "::error::libmono.so was not found."
+            exit 1
+          fi
+
+          {
+            echo "APK_SIZE=$(stat -c%s "$APK")"
+            echo "UNITY_VERSION=$VERSION"
+            echo "ASSEMBLY_CSHARP_SIZE=$(stat -c%s "$ASM")"
+            echo "SCENE_LEVEL0_SIZE=$(stat -c%s "$DATA/level0" 2>/dev/null || echo 0)"
+            echo "SCENE_LEVEL1_SIZE=$(stat -c%s "$DATA/level1" 2>/dev/null || echo 0)"
+            echo "ARCHS:"
+            find "$APKROOT/lib" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+            echo "MANAGED_DLLS:"
+            find "$DATA/Managed" -type f -name '*.dll' -printf '%f  %s bytes\n' | sort
+          } | tee "$OUTPUT/apk-summary.txt"
+
+      - name: Extract original APK icon
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ICON="$APKROOT/res/drawable-xxxhdpi-v4/app_icon.png"
+
+          if [ ! -s "$ICON" ]; then
+            ICON="$(
+              find "$APKROOT/res" \
+                -type f \
+                -name 'app_icon.png' \
+                -printf '%s %p\n' \
+                | sort -nr \
+                | head -1 \
+                | cut -d' ' -f2-
+            )"
+          fi
+
+          if [ -z "$ICON" ] || [ ! -s "$ICON" ]; then
+            echo "::error::Original app_icon.png not found."
+            exit 1
+          fi
+
+          cp "$ICON" "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"
+          file "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"
+          ls -lh "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"
+
+      - name: Download AssetRipper 2.0.0
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$WORK/tools/assetripper"
+
+          gh release download 2.0.0 \
+            -R AssetRipper/AssetRipper \
+            -p 'AssetRipper_linux_x64.tar.xz' \
+            -D "$WORK/tools"
+
+          tar -xJf "$WORK/tools/AssetRipper_linux_x64.tar.xz" \
+            -C "$WORK/tools/assetripper"
+
+          RIPPER="$(
+            find "$WORK/tools/assetripper" \
+              -type f \
+              \( -name 'AssetRipper.GUI.Free' -o -name 'AssetRipper.GUI' -o -name 'AssetRipper' \) \
+              -print \
+              | head -1
+          )"
+
+          if [ -z "$RIPPER" ]; then
+            echo "::error::AssetRipper executable not found."
+            find "$WORK/tools/assetripper" -maxdepth 5 -type f | head -300
+            exit 1
+          fi
+
+          chmod +x "$RIPPER"
+          echo "RIPPER=$RIPPER" >> "$GITHUB_ENV"
+          "$RIPPER" --help > "$OUTPUT/assetripper-help.txt" 2>&1 || true
+
+      - name: Recover editable Unity project
+        id: recover
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PORT=3333
+          EXPORT="$RECOVERED/WatchDogs2Mobile"
+          mkdir -p "$EXPORT"
+
+          "$RIPPER" \
+            --headless \
+            --port "$PORT" \
+            > "$OUTPUT/assetripper.log" 2>&1 &
+
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for i in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::AssetRipper did not start."
+            tail -300 "$OUTPUT/assetripper.log" || true
+            exit 1
+          fi
+
+          LOAD_CODE="$(
+            curl -sS \
+              -o "$OUTPUT/assetripper-load-response.txt" \
+              -w '%{http_code}' \
+              -H 'Content-Type: application/x-www-form-urlencoded' \
+              --data-urlencode "Path=$APKROOT" \
+              "http://127.0.0.1:${PORT}/LoadFolder"
+          )"
+
+          echo "LOAD_HTTP=$LOAD_CODE"
+
+          if [ "$LOAD_CODE" != "200" ] && [ "$LOAD_CODE" != "302" ]; then
+            echo "::error::AssetRipper LoadFolder failed."
+            cat "$OUTPUT/assetripper-load-response.txt" || true
+            exit 1
+          fi
+
+          EXPORT_CODE="$(
+            curl -sS \
+              -o "$OUTPUT/assetripper-export-response.txt" \
+              -w '%{http_code}' \
+              -H 'Content-Type: application/x-www-form-urlencoded' \
+              --data-urlencode "Path=$EXPORT" \
+              --data-urlencode 'CreateSubfolder=false' \
+              "http://127.0.0.1:${PORT}/Export/UnityProject"
+          )"
+
+          echo "EXPORT_HTTP=$EXPORT_CODE"
+
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+
+          if [ "$EXPORT_CODE" != "200" ] && [ "$EXPORT_CODE" != "302" ]; then
+            echo "::error::AssetRipper Unity project export failed."
+            cat "$OUTPUT/assetripper-export-response.txt" || true
+            tail -500 "$OUTPUT/assetripper.log" || true
+            exit 1
+          fi
+
+          PROJECT=""
+          if [ -d "$EXPORT/ExportedProject/Assets" ]; then
+            PROJECT="$EXPORT/ExportedProject"
+          elif [ -d "$EXPORT/Assets" ]; then
+            PROJECT="$EXPORT"
+          else
+            PROJECT="$(
+              find "$EXPORT" -type d -name Assets -print \
+                | head -1 \
+                | xargs -r dirname
+            )"
+          fi
+
+          if [ -z "$PROJECT" ] || [ ! -d "$PROJECT/Assets" ]; then
+            echo "::error::Recovered Unity project not found."
+            find "$EXPORT" -maxdepth 5 -type d | head -300
+            exit 1
+          fi
+
+          PROJECT="$(realpath "$PROJECT")"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+          {
+            echo "RECOVERED_PROJECT=$PROJECT"
+            echo "SCENES=$(find "$PROJECT/Assets" -type f -name '*.unity' | wc -l | tr -d ' ')"
+            echo "CS_FILES=$(find "$PROJECT/Assets" -type f -name '*.cs' | wc -l | tr -d ' ')"
+            echo "DLLS=$(find "$PROJECT/Assets" -type f -name '*.dll' | wc -l | tr -d ' ')"
+            echo
+            echo "SCENES:"
+            find "$PROJECT/Assets" -type f -name '*.unity' | sort
+          } | tee "$OUTPUT/recovery-summary.txt"
+
+      - name: Prepare recovered project for Unity 2019 iOS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.recover.outputs.project }}"
+
+          echo "===== REMOVE ANDROID-ONLY FILES ====="
+          find "$PROJECT/Assets" -type f \
+            \( -iname '*.so' -o -iname '*.aar' -o -iname '*.jar' -o -iname '*.apk' \) \
+            -print \
+            | tee "$OUTPUT/removed-android-files.txt" || true
+
+          find "$PROJECT/Assets" -type f \
+            \( -iname '*.so' -o -iname '*.aar' -o -iname '*.jar' -o -iname '*.apk' \) \
+            -delete || true
+
+          rm -rf "$PROJECT/Assets/Plugins/Android" || true
+
+          echo "===== REMOVE RECOVERED UNITY/BCL DLL COPIES ====="
+          python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT"])
+          names = {
+              "UnityEngine.dll",
+              "UnityEngine.UI.dll",
+              "UnityEngine.Networking.dll",
+              "mscorlib.dll",
+              "System.dll",
+              "System.Core.dll",
+              "Mono.Security.dll",
+          }
+
+          moved = project.parent / "removed-runtime-dlls-v1"
+          moved.mkdir(parents=True, exist_ok=True)
+
+          for p in list((project / "Assets").rglob("*.dll")):
+              if p.name in names:
+                  rel = p.relative_to(project / "Assets")
+                  dst = moved / rel
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.move(str(p), str(dst))
+                  meta = Path(str(p) + ".meta")
+                  if meta.exists():
+                      shutil.move(str(meta), str(dst) + ".meta")
+                  print("moved", rel)
+          PY
+
+          mkdir -p "$PROJECT/Assets/WatchDogs2iOS/Editor"
+
+          cp "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png" \
+            "$PROJECT/Assets/WatchDogs2iOS/app_icon.png"
+
+          # AssetRipper recovers the 5.6.5f1 project. We intentionally migrate the
+          # recovered content to 2019.4.40f1 because that LTS editor has Linux iOS
+          # Build Support and produces an Xcode project that is much more likely to
+          # compile with current Xcode than Unity 5.6 output.
+          cat > "$PROJECT/ProjectSettings/ProjectVersion.txt" <<'EOF'
+          m_EditorVersion: 2019.4.40f1
+          m_EditorVersionWithRevision: 2019.4.40f1 (ffc62b691db5)
+          EOF
+
+          cat > "$PROJECT/Assets/WatchDogs2iOS/WatchDogs2IOSRuntimeLogger.cs" <<'CS'
+          using System;
+          using System.IO;
+          using UnityEngine;
+
+          public static class WatchDogs2IOSRuntimeLogger
+          {
+              static string LogPath
+              {
+                  get { return Path.Combine(Application.persistentDataPath, "runtime.log"); }
+              }
+
+              [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+              static void Install()
+              {
+                  try
+                  {
+                      File.AppendAllText(LogPath,
+                          "\n=== Watch Dogs 2 Mobile iOS START " +
+                          DateTime.Now.ToString("O") + " ===\n" +
+                          "Unity=" + Application.unityVersion + "\n" +
+                          "OS=" + SystemInfo.operatingSystem + "\n" +
+                          "GPU=" + SystemInfo.graphicsDeviceName + "\n" +
+                          "Graphics=" + SystemInfo.graphicsDeviceVersion + "\n");
+                  }
+                  catch {}
+
+                  Application.logMessageReceived += OnLog;
+              }
+
+              static void OnLog(string condition, string stackTrace, LogType type)
+              {
+                  try
+                  {
+                      File.AppendAllText(
+                          LogPath,
+                          "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " +
+                          type + ": " + condition + "\n" +
+                          (string.IsNullOrEmpty(stackTrace) ? "" : stackTrace + "\n")
+                      );
+                  }
+                  catch {}
+              }
+          }
+          CS
+
+          cat > "$PROJECT/Assets/WatchDogs2iOS/Editor/WatchDogs2IOSBuild.cs" <<'CS'
+          using System;
+          using System.IO;
+          using System.Linq;
+          using UnityEditor;
+          using UnityEditor.Build.Reporting;
+          using UnityEngine;
+          using UnityEngine.Rendering;
+
+          public static class WatchDogs2IOSBuild
+          {
+              public static void PerformBuild()
+              {
+                  string output = Environment.GetEnvironmentVariable("WD2_IOS_XCODE_PATH");
+                  if (string.IsNullOrEmpty(output))
+                      throw new Exception("WD2_IOS_XCODE_PATH is missing.");
+
+                  Directory.CreateDirectory(Path.GetDirectoryName(output));
+
+                  EditorUserBuildSettings.SwitchActiveBuildTarget(
+                      BuildTargetGroup.iOS,
+                      BuildTarget.iOS
+                  );
+
+                  PlayerSettings.productName = "Watch Dogs 2 Mobile";
+                  PlayerSettings.companyName = "Watch Dogs 2 Mobile Port";
+                  PlayerSettings.SetApplicationIdentifier(
+                      BuildTargetGroup.iOS,
+                      "com.negel.watchdogs2mobile"
+                  );
+                  PlayerSettings.bundleVersion = "1.1";
+
+                  PlayerSettings.SetScriptingBackend(
+                      BuildTargetGroup.iOS,
+                      ScriptingImplementation.IL2CPP
+                  );
+
+                  PlayerSettings.iOS.targetOSVersionString = "12.0";
+                  PlayerSettings.iOS.sdkVersion = iOSSdkVersion.DeviceSDK;
+                  PlayerSettings.iOS.targetDevice = iOSTargetDevice.iPhoneAndiPad;
+
+                  PlayerSettings.defaultInterfaceOrientation =
+                      UIOrientation.LandscapeLeft;
+                  PlayerSettings.allowedAutorotateToPortrait = false;
+                  PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
+                  PlayerSettings.allowedAutorotateToLandscapeLeft = true;
+                  PlayerSettings.allowedAutorotateToLandscapeRight = true;
+
+                  try
+                  {
+                      PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.iOS, false);
+                      PlayerSettings.SetGraphicsAPIs(
+                          BuildTarget.iOS,
+                          new [] { GraphicsDeviceType.Metal }
+                      );
+                  }
+                  catch (Exception e)
+                  {
+                      Debug.LogWarning("Graphics API setup: " + e);
+                  }
+
+                  try
+                  {
+                      Texture2D icon = AssetDatabase.LoadAssetAtPath<Texture2D>(
+                          "Assets/WatchDogs2iOS/app_icon.png"
+                      );
+                      if (icon != null)
+                      {
+                          int[] sizes = PlayerSettings.GetIconSizesForTargetGroup(
+                              BuildTargetGroup.iOS
+                          );
+                          Texture2D[] icons = sizes.Select(x => icon).ToArray();
+                          PlayerSettings.SetIconsForTargetGroup(
+                              BuildTargetGroup.iOS,
+                              icons
+                          );
+                          Debug.Log("Original APK icon assigned to iOS.");
+                      }
+                  }
+                  catch (Exception e)
+                  {
+                      Debug.LogWarning("Icon assignment: " + e);
+                  }
+
+                  string[] scenes = AssetDatabase.FindAssets("t:Scene")
+                      .Select(AssetDatabase.GUIDToAssetPath)
+                      .Where(p => p.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                      .OrderBy(p =>
+                          p.IndexOf("Home", StringComparison.OrdinalIgnoreCase) >= 0 ? 0 :
+                          p.IndexOf("GamePlay", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 2)
+                      .ThenBy(p => p)
+                      .ToArray();
+
+                  Debug.Log("===== WATCH DOGS 2 MOBILE SCENES =====");
+                  foreach (string s in scenes)
+                      Debug.Log(s);
+
+                  if (scenes.Length == 0)
+                      throw new Exception("No recovered Unity scenes were found.");
+
+                  BuildPlayerOptions opts = new BuildPlayerOptions
+                  {
+                      scenes = scenes,
+                      locationPathName = output,
+                      target = BuildTarget.iOS,
+                      targetGroup = BuildTargetGroup.iOS,
+                      options = BuildOptions.Development
+                  };
+
+                  BuildReport report = BuildPipeline.BuildPlayer(opts);
+
+                  Debug.Log("===== WATCH DOGS 2 iOS RESULT =====");
+                  Debug.Log(report.summary.result);
+                  Debug.Log("Errors=" + report.summary.totalErrors);
+                  Debug.Log("Warnings=" + report.summary.totalWarnings);
+                  Debug.Log("Output=" + report.summary.outputPath);
+
+                  if (report.summary.result != BuildResult.Succeeded)
+                      throw new Exception(
+                          "Unity iOS build failed: " +
+                          report.summary.result +
+                          ", errors=" + report.summary.totalErrors
+                      );
+              }
+          }
+          CS
+
+          echo "===== RECOVERED C# SAMPLE ====="
+          find "$PROJECT/Assets" -type f -name '*.cs' \
+            | sed -n '1,120p' \
+            | tee "$OUTPUT/csharp-files.txt"
+
+      - name: Check Unity credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${UNITY_USERNAME:-}" || {
+            echo "::error::UNITY_USERNAME repository secret is missing."
+            exit 1
+          }
+          test -n "${UNITY_PASSWORD:-}" || {
+            echo "::error::UNITY_PASSWORD repository secret is missing."
+            exit 1
+          }
+          echo "Unity credentials are present."
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Unity Hub and helper CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm install -g @rage-against-the-pixel/unity-cli
+
+          sudo apt-get update -o Acquire::Retries=4 || true
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            gnupg \
+            xvfb \
+            libgbm1 \
+            libgtk-3-0 \
+            libnss3
+
+          sudo install -d -m 0755 /etc/apt/keyrings
+
+          curl -fsSL https://hub.unity3d.com/linux/keys/public \
+            | sudo gpg --dearmor \
+              -o /etc/apt/keyrings/unityhub.gpg
+
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/unityhub.gpg] https://hub.unity3d.com/linux/repos/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/unityhub.list >/dev/null
+
+          sudo apt-get update -o Acquire::Retries=4 || true
+          sudo apt-get install -y unityhub
+
+          HUB_CMD="$(command -v unityhub)"
+
+          sudo mkdir -p /opt/unityhub
+          sudo tee /opt/unityhub/unityhub >/dev/null <<EOF
+          #!/bin/bash
+          exec xvfb-run -a "$HUB_CMD" --no-sandbox --headless "\$@"
+          EOF
+          sudo chmod +x /opt/unityhub/unityhub
+
+          echo "UNITY_HUB_PATH=/opt/unityhub/unityhub" >> "$GITHUB_ENV"
+          echo "/opt/unityhub" >> "$GITHUB_PATH"
+
+      - name: Install official Unity CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export UNITY_CLI_HOME="$WORK/tools/unity-official-cli"
+          export UNITY_CLI_CHANNEL="beta"
+          export UNITY_NON_INTERACTIVE=1
+          export UNITY_NO_CONSENT_PROMPT=1
+          export UNITY_NO_UPDATE_CHECK=1
+
+          mkdir -p "$UNITY_CLI_HOME"
+
+          curl -fsSL --retry 5 --retry-delay 3 \
+            https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.sh \
+            -o "$WORK/unity-cli-install.sh"
+
+          bash "$WORK/unity-cli-install.sh"
+
+          OFFICIAL="$UNITY_CLI_HOME/bin/unity"
+          test -x "$OFFICIAL"
+
+          echo "OFFICIAL_UNITY_CLI=$OFFICIAL" >> "$GITHUB_ENV"
+          "$OFFICIAL" --version
+
+      - name: Install Unity 2019.4.40f1 and iOS support
+        id: unity_setup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INSTALL_ROOT="$HOME/UnityEditors"
+          mkdir -p "$INSTALL_ROOT"
+
+          export UNITY_NON_INTERACTIVE=1
+          export UNITY_NO_CONSENT_PROMPT=1
+          export UNITY_NO_UPDATE_CHECK=1
+          export UNITY_INSTALL_RETRIES=3
+
+          "$OFFICIAL_UNITY_CLI" \
+            --non-interactive \
+            --no-banner \
+            --no-color \
+            editors install-path --set "$INSTALL_ROOT"
+
+          set +e
+          timeout 70m "$OFFICIAL_UNITY_CLI" \
+            --non-interactive \
+            --no-banner \
+            --no-color \
+            install "$UNITY_VERSION" \
+            --changeset "$UNITY_CHANGESET" \
+            --module ios \
+            --no-child-modules \
+            --yes \
+            --accept-eula \
+            2>&1 | tee "$OUTPUT/unity-install.log"
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::Unity install failed with exit $RC."
+            exit "$RC"
+          fi
+
+          EDITOR="$(
+            find "$INSTALL_ROOT" \
+              -type f \
+              -path '*/Editor/Unity' \
+              -perm -111 \
+              -print \
+              | head -1
+          )"
+
+          if [ -z "$EDITOR" ]; then
+            echo "::error::Unity Editor executable not found."
+            find "$INSTALL_ROOT" -maxdepth 6 -type f | head -400
+            exit 1
+          fi
+
+          echo "UNITY_EDITOR=$EDITOR" >> "$GITHUB_ENV"
+          echo "editor=$EDITOR" >> "$GITHUB_OUTPUT"
+          "$EDITOR" -version || true
+
+      - name: Activate Unity Personal
+        shell: bash
+        env:
+          UNITY_HUB_PATH: /opt/unityhub/unityhub
+        run: |
+          set -euo pipefail
+
+          CLIENT="$(
+            find /usr /opt "$HOME" \
+              -type f \
+              -name 'Unity.Licensing.Client' \
+              2>/dev/null \
+              | head -1
+          )"
+
+          if [ -n "$CLIENT" ]; then
+            CLIENT_DIR="$(dirname "$CLIENT")"
+            sudo rm -rf /opt/unityhub/UnityLicensingClient
+            sudo mkdir -p /opt/unityhub/UnityLicensingClient
+            sudo cp -a "$CLIENT_DIR"/. /opt/unityhub/UnityLicensingClient/
+            sudo chmod +x /opt/unityhub/UnityLicensingClient/Unity.Licensing.Client || true
+          fi
+
+          GLOBAL_NODE_MODULES="$(npm root -g)"
+          LICENSE_MODULE="$GLOBAL_NODE_MODULES/@rage-against-the-pixel/unity-cli/dist/license-client.js"
+
+          test -f "$LICENSE_MODULE"
+          export LICENSE_MODULE
+
+          node <<'NODE'
+          const { LicensingClient, LicenseType } =
+            require(process.env.LICENSE_MODULE);
+
+          async function main() {
+            const client = new LicensingClient('6.x');
+            await client.Activate(
+              {
+                licenseType: LicenseType.personal,
+                username: process.env.UNITY_USERNAME,
+                password: process.env.UNITY_PASSWORD
+              },
+              true
+            );
+            console.log("UNITY PERSONAL ACTIVATION: SUCCESS");
+          }
+
+          main().catch((e) => {
+            console.error("UNITY PERSONAL ACTIVATION FAILED");
+            console.error(e && e.stack ? e.stack : e);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Build Watch Dogs 2 Mobile iOS Xcode project
+        id: unity_build
+        shell: bash
+        env:
+          WD2_IOS_XCODE_PATH: ${{ github.workspace }}/wd2-build/iOS/WatchDogs2Mobile-iOS
+        run: |
+          set +e
+
+          PROJECT="${{ steps.recover.outputs.project }}"
+          LOG="$OUTPUT/unity-ios-build.log"
+
+          rm -rf "$PROJECT/Library" "$PROJECT/Temp" "$PROJECT/obj" \
+            2>/dev/null || true
+
+          echo "===== WATCH DOGS 2 MOBILE iOS v1 ====="
+          echo "Recovered from Unity 5.6.5f1 Mono APK"
+          echo "Build editor: $UNITY_VERSION"
+          echo "Project: $PROJECT"
+          echo "Output: $WD2_IOS_XCODE_PATH"
+
+          timeout 90m xvfb-run -a "$UNITY_EDITOR" \
+            -batchmode \
+            -nographics \
+            -quit \
+            -projectPath "$PROJECT" \
+            -buildTarget iOS \
+            -executeMethod WatchDogs2IOSBuild.PerformBuild \
+            -logFile "$LOG"
+
+          RC=$?
+          echo "UNITY_EXIT_CODE=$RC" | tee "$OUTPUT/unity-exit-code.txt"
+
+          echo "===== UNITY LOG TAIL ====="
+          tail -450 "$LOG" || true
+
+          echo "===== IMPORTANT UNITY ERRORS ====="
+          grep -nEi -A 25 -B 8 \
+            'error CS[0-9]+|Compilation failed|compiler error|Exception|Error building Player|BuildFailedException|DllNotFoundException|TypeLoadException|MissingReferenceException|Fatal error|failed' \
+            "$LOG" \
+            | tail -500 || true
+
+          exit "$RC"
+
+      - name: Detect Xcode project
+        id: detect_xcode
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          PROJ="$(
+            find "$GITHUB_WORKSPACE/wd2-build" \
+              -type d \
+              -name '*.xcodeproj' \
+              -print \
+              | head -1
+          )"
+
+          if [ -n "$PROJ" ] && [ -f "$PROJ/project.pbxproj" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "xcode_project=$PROJ" >> "$GITHUB_OUTPUT"
+            echo "XCODE PROJECT FOUND: $PROJ"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No Xcode project was generated."
+          fi
+
+      - name: Pack Xcode project
+        if: steps.detect_xcode.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz" \
+            -C "$GITHUB_WORKSPACE/wd2-build/iOS" \
+            WatchDogs2Mobile-iOS
+
+          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz"
+
+      - name: Collect Unity diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics"
+          rm -rf "$DIAG"
+          mkdir -p "$DIAG"
+
+          cp "$OUTPUT/apk-summary.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/recovery-summary.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/assetripper.log" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/unity-install.log" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/unity-ios-build.log" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/csharp-files.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/removed-android-files.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png" "$DIAG/" 2>/dev/null || true
+
+          if [ -n "${PROJECT:-}" ] && [ -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
+            cp "$PROJECT/ProjectSettings/ProjectVersion.txt" "$DIAG/" || true
+          fi
+
+          {
+            echo "SOURCE_UNITY=5.6.5f1"
+            echo "BUILD_UNITY=$UNITY_VERSION"
+            echo "XCODE_READY=${{ steps.detect_xcode.outputs.ready }}"
+            echo "RECOVER_OUTCOME=${{ steps.recover.outcome }}"
+            echo "UNITY_BUILD_OUTCOME=${{ steps.unity_build.outcome }}"
+          } > "$DIAG/summary.txt"
+
+          grep -RniE \
+            'error CS[0-9]+|Compilation failed|compiler error|Exception|failed|failure|unsupported|DllNotFoundException|TypeLoadException|MissingReferenceException|BuildFailedException' \
+            "$DIAG" \
+            > "$DIAG/important-errors.txt" \
+            2>/dev/null || true
+
+          tail -500 "$DIAG/important-errors.txt" || true
+
+      - name: Upload Xcode project
+        if: steps.detect_xcode.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode
+          path: Watch-Dogs-2-Mobile-iOS-v1-Xcode.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload Unity diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics
+          compression-level: 0
+          if-no-files-found: warn
+
+      - name: Fail if Xcode was not generated
+        if: always() && steps.detect_xcode.outputs.ready != 'true'
+        shell: bash
+        run: |
+          echo "::error::Unity did not generate the Watch Dogs 2 Mobile iOS Xcode project."
+          echo "Download Watch-Dogs-2-Mobile-iOS-v1-Unity-Diagnostics and send it here."
+          exit 1
+
+  make_ipa:
+    name: 2. Build unsigned IPA
+    needs: recover_and_build
+    if: needs.recover_and_build.outputs.xcode_ready == 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Download Xcode project
+        uses: actions/download-artifact@v4
+        with:
+          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode
+          path: packed-xcode
+
+      - name: Extract Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$(
+            find packed-xcode -type f -name '*.tar.gz' -print | head -1
+          )"
+
+          test -s "$ARCHIVE"
+
+          rm -rf unity-ios
+          mkdir -p unity-ios
+          tar -xzf "$ARCHIVE" -C unity-ios
+
+          PROJ="$(
+            find unity-ios \
+              -type d \
+              -name '*.xcodeproj' \
+              -print \
+              | head -1
+          )"
+
+          if [ -z "$PROJ" ]; then
+            echo "::error::Xcode project not found."
+            exit 1
+          fi
+
+          echo "XCODE_PROJECT=$PROJ" >> "$GITHUB_ENV"
+          echo "XCODE_ROOT=$(dirname "$PROJ")" >> "$GITHUB_ENV"
+
+          echo "Xcode project: $PROJ"
+          xcodebuild -version
+          xcodebuild -list -project "$PROJ"
+
+      - name: Patch old Unity Xcode settings for current Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PBX="$XCODE_PROJECT/project.pbxproj"
+
+          # Unity 2019 may export settings that modern Xcode no longer likes.
+          sed -i '' \
+            -e 's/ENABLE_BITCODE = YES;/ENABLE_BITCODE = NO;/g' \
+            -e 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9][0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 12.0;/g' \
+            "$PBX" || true
+
+          # Add a minimal privacy manifest for current iOS toolchains.
+          mkdir -p "$XCODE_ROOT/UnityFramework"
+
+          cat > "$XCODE_ROOT/UnityFramework/PrivacyInfo.xcprivacy" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>NSPrivacyTracking</key>
+            <false/>
+            <key>NSPrivacyTrackingDomains</key>
+            <array/>
+            <key>NSPrivacyCollectedDataTypes</key>
+            <array/>
+            <key>NSPrivacyAccessedAPITypes</key>
+            <array/>
+          </dict>
+          </plist>
+          PLIST
+
+          plutil -lint "$XCODE_ROOT/UnityFramework/PrivacyInfo.xcprivacy" || true
+
+      - name: Build unsigned iPhone app
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+
+          rm -rf DerivedData xcode-build.log
+
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "Unity-iPhone" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_BITCODE=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            build \
+            2>&1 | tee xcode-build.log
+
+      - name: Validate app
+        id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(
+            find DerivedData/Build/Products \
+              -type d \
+              -path '*Release-iphoneos/*.app' \
+              -print \
+              | head -1
+          )"
+
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::.app not found."
+            exit 1
+          fi
+
+          PLIST="$APP/Info.plist"
+          test -s "$PLIST"
+
+          EXEC="$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :CFBundleExecutable' \
+              "$PLIST"
+          )"
+
+          test -s "$APP/$EXEC"
+
+          APP_KB="$(du -sk "$APP" | awk '{print $1}')"
+          echo "APP_SIZE_KB=$APP_KB"
+
+          if [ "$APP_KB" -lt 15000 ]; then
+            echo "::error::App is suspiciously small."
+            exit 1
+          fi
+
+          echo "path=$APP" >> "$GITHUB_OUTPUT"
+
+          echo "===== APP VERIFIED ====="
+          du -sh "$APP"
+          file "$APP/$EXEC"
+          lipo -info "$APP/$EXEC" || true
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="${{ steps.app.outputs.path }}"
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -a "$APP" Payload/
+          xattr -cr Payload || true
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            Payload \
+            "Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa"
+
+          ls -lh "Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch-Dogs-2-Mobile-iOS-v1-unsigned-IPA
+          path: Watch-Dogs-2-Mobile-iOS-v1-unsigned.ipa
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Collect Xcode diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+
+          rm -rf Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+          mkdir -p Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+
+          cp xcode-build.log \
+            Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/ \
+            2>/dev/null || true
+
+          cp "$XCODE_PROJECT/project.pbxproj" \
+            Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/ \
+            2>/dev/null || true
+
+          {
+            xcodebuild -version
+            echo
+            xcodebuild -list -project "$XCODE_PROJECT" 2>&1 || true
+          } > Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/xcode-info.txt
+
+          grep -nEi -A 20 -B 8 \
+            'error:|fatal error|undefined symbol|ld:|clang:|failed|failure' \
+            xcode-build.log \
+            | tail -500 \
+            > Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics/important-errors.txt \
+            2>/dev/null || true
+
+      - name: Upload Xcode diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1-Xcode-Diagnostics
+          compression-level: 0
+          if-no-files-found: warn

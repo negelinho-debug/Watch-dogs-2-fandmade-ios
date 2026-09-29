@@ -1,4 +1,4 @@
-name: Watch Dogs 2 Mobile iOS - v1.1 Unity Legacy Lib Fix
+name: Watch Dogs 2 Mobile iOS - v1.2 UGUI + Original Icon Fix
 
 on:
   workflow_dispatch:
@@ -418,6 +418,86 @@ jobs:
           m_EditorVersionWithRevision: 2019.4.40f1 (ffc62b691db5)
           EOF
 
+          echo "===== INSTALL UNITY 2019 UGUI / BUILTIN MODULE MANIFEST ====="
+          mkdir -p "$PROJECT/Packages"
+
+          cat > "$PROJECT/Packages/manifest.json" <<'JSON'
+          {
+            "dependencies": {
+              "com.unity.ugui": "1.0.0",
+              "com.unity.modules.ai": "1.0.0",
+              "com.unity.modules.animation": "1.0.0",
+              "com.unity.modules.assetbundle": "1.0.0",
+              "com.unity.modules.audio": "1.0.0",
+              "com.unity.modules.cloth": "1.0.0",
+              "com.unity.modules.director": "1.0.0",
+              "com.unity.modules.imageconversion": "1.0.0",
+              "com.unity.modules.imgui": "1.0.0",
+              "com.unity.modules.jsonserialize": "1.0.0",
+              "com.unity.modules.particlesystem": "1.0.0",
+              "com.unity.modules.physics": "1.0.0",
+              "com.unity.modules.physics2d": "1.0.0",
+              "com.unity.modules.screencapture": "1.0.0",
+              "com.unity.modules.terrain": "1.0.0",
+              "com.unity.modules.terrainphysics": "1.0.0",
+              "com.unity.modules.tilemap": "1.0.0",
+              "com.unity.modules.ui": "1.0.0",
+              "com.unity.modules.uielements": "1.0.0",
+              "com.unity.modules.umbra": "1.0.0",
+              "com.unity.modules.unityanalytics": "1.0.0",
+              "com.unity.modules.unitywebrequest": "1.0.0",
+              "com.unity.modules.unitywebrequestassetbundle": "1.0.0",
+              "com.unity.modules.unitywebrequestaudio": "1.0.0",
+              "com.unity.modules.unitywebrequesttexture": "1.0.0",
+              "com.unity.modules.unitywebrequestwww": "1.0.0",
+              "com.unity.modules.vehicles": "1.0.0",
+              "com.unity.modules.video": "1.0.0",
+              "com.unity.modules.vr": "1.0.0",
+              "com.unity.modules.wind": "1.0.0",
+              "com.unity.modules.xr": "1.0.0"
+            }
+          }
+          JSON
+
+          rm -f "$PROJECT/Packages/packages-lock.json" || true
+          cp "$PROJECT/Packages/manifest.json" "$OUTPUT/manifest-v1.2.json"
+
+          echo "===== PATCH REMOVED UNITY 5 GUI APIS ====="
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT"])
+          root = project / "Assets" / "Scripts" / "Assembly-CSharp"
+          changed = []
+
+          for p in root.rglob("*.cs"):
+              try:
+                  s = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  s = p.read_text(encoding="latin1")
+
+              old = s
+
+              # Unity 2019 removed GUIText/GUITexture.  Fully-qualified UGUI
+              # replacements avoid needing to inject `using` lines everywhere.
+              s = re.sub(r'\bGUIText\b', 'UnityEngine.UI.Text', s)
+              s = re.sub(r'\bGUITexture\b', 'UnityEngine.UI.Image', s)
+
+              if s != old:
+                  p.write_text(s, encoding="utf-8")
+                  changed.append(str(p.relative_to(project)))
+
+          report = Path(os.environ["OUTPUT"]) / "legacy-gui-patched-v1.2.txt"
+          report.write_text("\n".join(changed) + ("\n" if changed else ""), encoding="utf-8")
+          print("Patched legacy GUI scripts:", len(changed))
+          for x in changed:
+              print("  ", x)
+          PY
+
+          echo "===== ORIGINAL ICON VERIFY ====="
+          sha256sum             "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"             "$PROJECT/Assets/WatchDogs2iOS/app_icon.png"             | tee "$OUTPUT/original-icon-sha256-v1.2.txt"
+
           cat > "$PROJECT/Assets/WatchDogs2iOS/WatchDogs2IOSRuntimeLogger.cs" <<'CS'
           using System;
           using System.IO;
@@ -494,7 +574,7 @@ jobs:
                       BuildTargetGroup.iOS,
                       "com.negel.watchdogs2mobile"
                   );
-                  PlayerSettings.bundleVersion = "1.1";
+                  PlayerSettings.bundleVersion = "1.2";
 
                   PlayerSettings.SetScriptingBackend(
                       BuildTargetGroup.iOS,
@@ -885,11 +965,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz" \
+          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz" \
             -C "$GITHUB_WORKSPACE/wd2-build/iOS" \
             WatchDogs2Mobile-iOS
 
-          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz"
+          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz"
 
       - name: Collect Unity diagnostics
         if: always()
@@ -897,7 +977,7 @@ jobs:
         run: |
           set +e
 
-          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics"
+          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics"
           rm -rf "$DIAG"
           mkdir -p "$DIAG"
 
@@ -908,6 +988,9 @@ jobs:
           cp "$OUTPUT/unity-ios-build.log" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/csharp-files.txt" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/removed-android-files.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/manifest-v1.2.json" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/legacy-gui-patched-v1.2.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/original-icon-sha256-v1.2.txt" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png" "$DIAG/" 2>/dev/null || true
 
           if [ -n "${PROJECT:-}" ] && [ -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
@@ -934,8 +1017,8 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode
-          path: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode.tar.gz
+          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode
+          path: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz
           compression-level: 0
           if-no-files-found: error
 
@@ -943,8 +1026,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics
           compression-level: 0
           if-no-files-found: warn
 
@@ -953,7 +1036,7 @@ jobs:
         shell: bash
         run: |
           echo "::error::Unity did not generate the Watch Dogs 2 Mobile iOS Xcode project."
-          echo "Download Watch-Dogs-2-Mobile-iOS-v1.1-Unity-Diagnostics and send it here."
+          echo "Download Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics and send it here."
           exit 1
 
   make_ipa:
@@ -967,7 +1050,7 @@ jobs:
       - name: Download Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode
+          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode
           path: packed-xcode
 
       - name: Extract Xcode project
@@ -1130,15 +1213,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            "Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa"
+            "Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa"
 
-          ls -lh "Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa"
+          ls -lh "Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.1-unsigned-IPA
-          path: Watch-Dogs-2-Mobile-iOS-v1.1-unsigned.ipa
+          name: Watch-Dogs-2-Mobile-iOS-v1.2-unsigned-IPA
+          path: |
+            Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa
           compression-level: 0
           if-no-files-found: error
 
@@ -1148,35 +1232,35 @@ jobs:
         run: |
           set +e
 
-          rm -rf Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
-          mkdir -p Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
+          rm -rf Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
+          mkdir -p Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
 
           cp xcode-build.log \
-            Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           cp "$XCODE_PROJECT/project.pbxproj" \
-            Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           {
             xcodebuild -version
             echo
             xcodebuild -list -project "$XCODE_PROJECT" 2>&1 || true
-          } > Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/xcode-info.txt
+          } > Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/xcode-info.txt
 
           grep -nEi -A 20 -B 8 \
             'error:|fatal error|undefined symbol|ld:|clang:|failed|failure' \
             xcode-build.log \
             | tail -500 \
-            > Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics/important-errors.txt \
+            > Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/important-errors.txt \
             2>/dev/null || true
 
       - name: Upload Xcode diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1.1-Xcode-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
           compression-level: 0
           if-no-files-found: warn

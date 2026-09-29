@@ -1,4 +1,4 @@
-name: Watch Dogs 2 Mobile iOS - v1.2 UGUI + Original Icon Fix
+name: Watch Dogs 2 Mobile iOS - v1.3 DepthOfField API Fix
 
 on:
   workflow_dispatch:
@@ -460,7 +460,7 @@ jobs:
           JSON
 
           rm -f "$PROJECT/Packages/packages-lock.json" || true
-          cp "$PROJECT/Packages/manifest.json" "$OUTPUT/manifest-v1.2.json"
+          cp "$PROJECT/Packages/manifest.json" "$OUTPUT/manifest-v1.3.json"
 
           echo "===== PATCH REMOVED UNITY 5 GUI APIS ====="
           python3 - <<'PY'
@@ -479,24 +479,46 @@ jobs:
 
               old = s
 
-              # Unity 2019 removed GUIText/GUITexture.  Fully-qualified UGUI
+              # Unity 2019 removed GUIText/GUITexture. Fully-qualified UGUI
               # replacements avoid needing to inject `using` lines everywhere.
               s = re.sub(r'\bGUIText\b', 'UnityEngine.UI.Text', s)
               s = re.sub(r'\bGUITexture\b', 'UnityEngine.UI.Image', s)
+
+              # Unity 5.6 Standard Assets DepthOfField uses this old API.
+              # In Unity 2019.4 it is a hard CS0619 compile error, not a warning.
+              s = s.replace('Graphics.DrawProceduralIndirect(',
+                            'Graphics.DrawProceduralIndirectNow(')
+
+              # Same DepthOfField script also uses the old enum name.
+              # This one is only a warning in 2019.4, but updating it keeps the
+              # recovered Standard Assets code on the current 2019 API.
+              s = s.replace('ComputeBufferType.DrawIndirect',
+                            'ComputeBufferType.IndirectArguments')
 
               if s != old:
                   p.write_text(s, encoding="utf-8")
                   changed.append(str(p.relative_to(project)))
 
-          report = Path(os.environ["OUTPUT"]) / "legacy-gui-patched-v1.2.txt"
+          report = Path(os.environ["OUTPUT"]) / "legacy-api-patched-v1.3.txt"
           report.write_text("\n".join(changed) + ("\n" if changed else ""), encoding="utf-8")
           print("Patched legacy GUI scripts:", len(changed))
           for x in changed:
               print("  ", x)
           PY
 
+          echo "===== VERIFY DEPTH OF FIELD API PATCH ====="
+          if grep -RIn --include='*.cs' 'Graphics\.DrawProceduralIndirect(' "$PROJECT/Assets" > "$OUTPUT/old-drawprocedural-v1.3.txt" 2>/dev/null; then
+            echo "::error::Old Graphics.DrawProceduralIndirect calls remain:"
+            cat "$OUTPUT/old-drawprocedural-v1.3.txt"
+            exit 1
+          else
+            echo "OK: old DrawProceduralIndirect API is gone." | tee "$OUTPUT/old-drawprocedural-v1.3.txt"
+          fi
+
+          grep -RIn --include='*.cs' 'DrawProceduralIndirectNow' "$PROJECT/Assets"             | tee "$OUTPUT/drawprocedural-now-v1.3.txt" || true
+
           echo "===== ORIGINAL ICON VERIFY ====="
-          sha256sum             "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"             "$PROJECT/Assets/WatchDogs2iOS/app_icon.png"             | tee "$OUTPUT/original-icon-sha256-v1.2.txt"
+          sha256sum             "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png"             "$PROJECT/Assets/WatchDogs2iOS/app_icon.png"             | tee "$OUTPUT/original-icon-sha256-v1.3.txt"
 
           cat > "$PROJECT/Assets/WatchDogs2iOS/WatchDogs2IOSRuntimeLogger.cs" <<'CS'
           using System;
@@ -965,11 +987,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz" \
+          tar -chzf "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.3-Xcode.tar.gz" \
             -C "$GITHUB_WORKSPACE/wd2-build/iOS" \
             WatchDogs2Mobile-iOS
 
-          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz"
+          ls -lh "$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.3-Xcode.tar.gz"
 
       - name: Collect Unity diagnostics
         if: always()
@@ -977,7 +999,7 @@ jobs:
         run: |
           set +e
 
-          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics"
+          DIAG="$GITHUB_WORKSPACE/Watch-Dogs-2-Mobile-iOS-v1.3-Unity-Diagnostics"
           rm -rf "$DIAG"
           mkdir -p "$DIAG"
 
@@ -988,9 +1010,11 @@ jobs:
           cp "$OUTPUT/unity-ios-build.log" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/csharp-files.txt" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/removed-android-files.txt" "$DIAG/" 2>/dev/null || true
-          cp "$OUTPUT/manifest-v1.2.json" "$DIAG/" 2>/dev/null || true
-          cp "$OUTPUT/legacy-gui-patched-v1.2.txt" "$DIAG/" 2>/dev/null || true
-          cp "$OUTPUT/original-icon-sha256-v1.2.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/manifest-v1.3.json" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/legacy-api-patched-v1.3.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/old-drawprocedural-v1.3.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/drawprocedural-now-v1.3.txt" "$DIAG/" 2>/dev/null || true
+          cp "$OUTPUT/original-icon-sha256-v1.3.txt" "$DIAG/" 2>/dev/null || true
           cp "$OUTPUT/Watch-Dogs-2-Mobile-original-icon.png" "$DIAG/" 2>/dev/null || true
 
           if [ -n "${PROJECT:-}" ] && [ -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
@@ -1017,8 +1041,8 @@ jobs:
         if: steps.detect_xcode.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode
-          path: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode.tar.gz
+          name: Watch-Dogs-2-Mobile-iOS-v1.3-Xcode
+          path: Watch-Dogs-2-Mobile-iOS-v1.3-Xcode.tar.gz
           compression-level: 0
           if-no-files-found: error
 
@@ -1026,8 +1050,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.3-Unity-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.3-Unity-Diagnostics
           compression-level: 0
           if-no-files-found: warn
 
@@ -1036,7 +1060,7 @@ jobs:
         shell: bash
         run: |
           echo "::error::Unity did not generate the Watch Dogs 2 Mobile iOS Xcode project."
-          echo "Download Watch-Dogs-2-Mobile-iOS-v1.2-Unity-Diagnostics and send it here."
+          echo "Download Watch-Dogs-2-Mobile-iOS-v1.3-Unity-Diagnostics and send it here."
           exit 1
 
   make_ipa:
@@ -1050,7 +1074,7 @@ jobs:
       - name: Download Xcode project
         uses: actions/download-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode
+          name: Watch-Dogs-2-Mobile-iOS-v1.3-Xcode
           path: packed-xcode
 
       - name: Extract Xcode project
@@ -1213,16 +1237,16 @@ jobs:
             --sequesterRsrc \
             --keepParent \
             Payload \
-            "Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa"
+            "Watch-Dogs-2-Mobile-iOS-v1.3-unsigned.ipa"
 
-          ls -lh "Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa"
+          ls -lh "Watch-Dogs-2-Mobile-iOS-v1.3-unsigned.ipa"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.2-unsigned-IPA
+          name: Watch-Dogs-2-Mobile-iOS-v1.3-unsigned-IPA
           path: |
-            Watch-Dogs-2-Mobile-iOS-v1.2-unsigned.ipa
+            Watch-Dogs-2-Mobile-iOS-v1.3-unsigned.ipa
           compression-level: 0
           if-no-files-found: error
 
@@ -1232,35 +1256,35 @@ jobs:
         run: |
           set +e
 
-          rm -rf Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
-          mkdir -p Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
+          rm -rf Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics
+          mkdir -p Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics
 
           cp xcode-build.log \
-            Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           cp "$XCODE_PROJECT/project.pbxproj" \
-            Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/ \
+            Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics/ \
             2>/dev/null || true
 
           {
             xcodebuild -version
             echo
             xcodebuild -list -project "$XCODE_PROJECT" 2>&1 || true
-          } > Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/xcode-info.txt
+          } > Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics/xcode-info.txt
 
           grep -nEi -A 20 -B 8 \
             'error:|fatal error|undefined symbol|ld:|clang:|failed|failure' \
             xcode-build.log \
             | tail -500 \
-            > Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics/important-errors.txt \
+            > Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics/important-errors.txt \
             2>/dev/null || true
 
       - name: Upload Xcode diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
-          path: Watch-Dogs-2-Mobile-iOS-v1.2-Xcode-Diagnostics
+          name: Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics
+          path: Watch-Dogs-2-Mobile-iOS-v1.3-Xcode-Diagnostics
           compression-level: 0
           if-no-files-found: warn
